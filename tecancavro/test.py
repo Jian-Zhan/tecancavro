@@ -15,10 +15,8 @@ xl3000 = XL3000(com_link,
 xl3000.init(init_port=8)
 print xl3000.getCurPort()
 
-xl3000.changePort(2, execute=True)
-xl3000.waitReady()
+xl3000.changePort(2, execute=True, wait_ready=False)
 print xl3000.getCurPort()
 
-xl3000.changePort(2, execute=True)
-xl3000.waitReady()
+xl3000.changePort(2, execute=True, wait_ready=True)
 print xl3000.getCurPort()

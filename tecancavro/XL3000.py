@@ -143,13 +143,11 @@ class XL3000(Syringe):
     #########################################################################
 
     def extractToWaste(self, in_port, volume_ul, out_port=None,
-                       speed_code=None, minimal_reset=False, flush=False):
+                       speed_code=None, flush=False):
         """
         Extracts `volume_ul` from `in_port`. If the relative plunger move
         exceeds the encoder range, the syringe will dispense to `out_port`,
-        which defaults to `self.waste_port`. If `minimal_reset` is `True`,
-        state updates upon execution will be based on simulations rather
-        than polling. If `flush` is `True`, the contents of the syringe
+        which defaults to `self.waste_port`. If `flush` is `True`, the contents of the syringe
         will be flushed to waste following the extraction.
 
         """
@@ -185,7 +183,7 @@ class XL3000(Syringe):
                 self.movePlungerRel(steps)
                 if flush:
                     self.dispenseToWaste()
-                exec_time = self.executeChain(minimal_reset=True)
+                exec_time = self.executeChain()
                 extracted = True
             except SyringeError as e:
                 if e.err_code in [2, 3, 4]:
@@ -247,7 +245,7 @@ class XL3000(Syringe):
     # Command chain functions                                               #
     #########################################################################
 
-    def executeChain(self, minimal_reset=False):
+    def executeChain(self, wait_ready=False):
         """
         Executes and resets the current command chain (`self.cmd_chain`).
         Returns the estimated execution time (`self.exec_time`) for the chain.
@@ -259,14 +257,14 @@ class XL3000(Syringe):
         tic = time.time()
         self.sendRcv(self.cmd_chain, execute=True)
         exec_time = self.exec_time
-        self.resetChain(on_execute=True, minimal_reset=minimal_reset)
+        self.resetChain(on_execute=True, wait_ready=wait_ready)
         toc = time.time()
         wait_time = exec_time - (toc-tic)
         if wait_time < 0:
             wait_time = 0
         return wait_time
 
-    def resetChain(self, on_execute=False, minimal_reset=False):
+    def resetChain(self, on_execute=False, wait_ready=False):
         """
         Resets the command chain (`self.cmd_chain`) and execution time
         (`self.exec_time`). Optionally updates `slope` and `microstep`
@@ -277,20 +275,12 @@ class XL3000(Syringe):
                                   the chain being reset was executed, which
                                   will cue slope and microstep state
                                   updating (as well as speed updating).
-            `minimal_reset` (bool) : minimizes additional polling of the
-                                     syringe pump and updates state based
-                                     on simulated calculations. Should
-                                     be extremely reliable but use with
-                                     caution.
         """
         self.logCall('resetChain', locals())
 
         self.cmd_chain = ''
         self.exec_time = 0
         if (on_execute and self.sim_speed_change):
-            if minimal_reset:
-                self.state = {k: v for k,v in self.sim_state.items()}
-            else:
                 self.state['slope'] = self.sim_state['slope']
                 self.state['microstep'] = self.sim_state['microstep']
                 self.updateSpeeds()
@@ -298,6 +288,8 @@ class XL3000(Syringe):
                 self.getPlungerPos()
         self.sim_speed_change = False
         self.updateSimState()
+        if wait_ready:
+            self.waitReady()
 
     def updateSimState(self):
         """
@@ -346,13 +338,13 @@ class XL3000(Syringe):
             execute = False
             if 'execute' in kwargs:
                 execute = kwargs.pop('execute')
-            if 'minimal_reset' in kwargs:
-                minimal_reset = kwargs.pop('minimal_reset')
+            if 'wait_ready' in kwargs:
+                wait_ready = kwargs.pop('wait_ready')
             else:
-                minimal_reset = False
+                wait_ready = False
             func(self, *args, **kwargs)
             if execute:
-                return self.executeChain(minimal_reset=minimal_reset)
+                return self.executeChain(wait_ready=wait_ready)
         return addAndExec
 
     #########################################################################
