@@ -3,6 +3,8 @@ XL3000.py
 
 Tecan Cavro XL3000 Pump.
 
+TODO: Check SPEED_CODES
+
 """
 import time
 import logging
@@ -17,7 +19,7 @@ try:
 except:
     from time import sleep
 
-from syringe import Syringe, SyringeError, SyringeTimeout, execWrap
+from syringe import Syringe, SyringeError, SyringeTimeout
 
 
 class XL3000(Syringe):
@@ -190,7 +192,7 @@ class XL3000(Syringe):
         self.sendRcv(cmd_string, execute=True)
         self.microstep = on
 
-    @execWrap
+    @Syringe.execWrap
     def setSpeed(self, speed_code):
         """ Set top speed by `speed_code` (see OEM docs) """
         self.logCall('setSpeed', locals())
@@ -203,7 +205,7 @@ class XL3000(Syringe):
         self._simIncToPulses(speed_code)
         self.cmd_chain += cmd_string
 
-    @execWrap
+    @Syringe.execWrap
     def setStartSpeed(self, pulses_per_sec):
         """ Set start speed in `pulses_per_sec` [50-1000] """
         self.logCall('setStartSpeed', locals())
@@ -212,7 +214,7 @@ class XL3000(Syringe):
         self.sim_speed_change = True
         self.cmd_chain += cmd_string
 
-    @execWrap
+    @Syringe.execWrap
     def setTopSpeed(self, pulses_per_sec):
         """ Set top speed in `pulses_per_sec` [5-6000] """
         self.logCall('setTopSpeed', locals())
@@ -221,7 +223,7 @@ class XL3000(Syringe):
         self.sim_speed_change = True
         self.cmd_chain += cmd_string
 
-    @execWrap
+    @Syringe.execWrap
     def setCutoffSpeed(self, pulses_per_sec):
         """ Set cutoff speed in `pulses_per_sec` [50-2700] """
         self.logCall('setCutoffSpeed', locals())
@@ -230,7 +232,7 @@ class XL3000(Syringe):
         self.sim_speed_change = True
         self.cmd_chain += cmd_string
 
-    @execWrap
+    @Syringe.execWrap
     def setSlope(self, slope_code, chain=False):
         self.logCall('setSlope', locals())
 
@@ -314,7 +316,7 @@ class XL3000(Syringe):
     # Chainable functions                                         #
     #########################################################################
 
-    @execWrap
+    @Syringe.execWrap
     def changePort(self, to_port, clockwise=None):
         """
         Change port to `to_port`. If `clockwise` is None, it
@@ -373,7 +375,7 @@ class XL3000(Syringe):
         self.exec_time += 0.02 * delta
         self.exec_time += 0.1
 
-    @execWrap
+    @Syringe.execWrap
     def movePlungerAbs(self, abs_position):
         """
         Moves the plunger to absolute position `abs_position`
@@ -403,7 +405,7 @@ class XL3000(Syringe):
         self.cmd_chain += cmd_string
         self.exec_time += self._calcPlungerMoveTime(abs(delta_pos))
 
-    @execWrap
+    @Syringe.execWrap
     def movePlungerRel(self, rel_position):
         """
         Moves the plunger to relative position `rel_position`. There is no
@@ -426,7 +428,7 @@ class XL3000(Syringe):
         self.cmd_chain += cmd_string
         self.exec_time += self._calcPlungerMoveTime(abs(rel_position))
 
-    @execWrap
+    @Syringe.execWrap
     def repeatCmdSeq(self, num_repeats):
         self.logCall('repeatCmdSeq', locals())
 
@@ -437,14 +439,14 @@ class XL3000(Syringe):
         self.cmd_chain += cmd_string
         self.exec_time *= num_repeats
 
-    @execWrap
+    @Syringe.execWrap
     def markRepeatStart(self):
         self.logCall('markRepeatStart', locals())
 
         cmd_string = 'g'
         self.cmd_chain += cmd_string
 
-    @execWrap
+    @Syringe.execWrap
     def delayExec(self, delay_ms):
         """ Delays command execution for `delay` milliseconds """
         self.logCall('delayExec', locals())
@@ -457,10 +459,41 @@ class XL3000(Syringe):
         self.exec_time += delay_ms/1000.0
 
     #########################################################################
+    # Chainable high level functions                                        #
+    #########################################################################
+
+    @Syringe.execWrap
+    def aspirate(self, from_port, volume_ul):
+        """ Aspirate `volume_ul` from `from_port` """
+        self.logCall('aspirate', locals())
+
+        steps = self._ulToSteps(volume_ul)
+        self.changePort(from_port)
+        self.movePlungerRel(steps)
+
+    @Syringe.execWrap
+    def dispense(self, to_port, volume_ul):
+        """ Dispense `volume_ul` from `to_port` """
+        self.logCall('dispense', locals())
+
+        steps = self._ulToSteps(volume_ul)
+        self.changePort(to_port)
+        self.movePlungerRel(-steps)
+
+    @Syringe.execWrap
+    def dispenseAll(self, to_port):
+        """
+        Dispense current syringe contents to `to_port`.
+        """
+        self.logCall('dispenseAll', locals())
+        self.changePort(to_port)
+        self.movePlungerAbs(0)
+
+    #########################################################################
     # Control commands                                                      #
     #########################################################################
 
-    @execWrap
+    @Syringe.execWrap
     def haltExec(self):
         """
         Used within a command string to halt execution until another [R]
@@ -602,7 +635,7 @@ class XL3000(Syringe):
     def _simIncToPulses(self, speed_inc):
         """
         Updates simulation speeds given a speed increment setting (`speed_inc`)
-        following XCalibur handling of speed changes (i.e. cutoff speed cannot
+        following XL3000 handling of speed changes (i.e. cutoff speed cannot
         be higher than top speed, so it is automatically adjusted on the pump)
 
         """

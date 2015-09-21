@@ -200,7 +200,7 @@ class Syringe(object):
             data = parsed_response[0]
             return data
 
-    def executeChain(self, wait_ready=False):
+    def executeChain(self, wait_ready=True):
         """
         Executes and resets the current command chain (`self.cmd_chain`).
         Returns the estimated execution time (`self.exec_time`) for the chain.
@@ -222,7 +222,7 @@ class Syringe(object):
                 extra_wait_time = 0
         return extra_wait_time
 
-    def resetChain(self, on_execute=False, wait_ready=False):
+    def resetChain(self, on_execute=False, wait_ready=True):
         """
         Resets the command chain (`self.cmd_chain`) and execution time
         (`self.exec_time`). Optionally updates `slope` and `microstep`
@@ -242,22 +242,22 @@ class Syringe(object):
         self.cmd_chain = ''
         self.exec_time = 0
 
-def execWrap(func):
-    """
-    Decorator to wrap chainable commands, allowing for immediate execution
-    of the wrapped command by passing in an `execute=True` kwarg.
-
-    """
-    @wraps(func)
-    def addAndExec(self, *args, **kwargs):
-        execute = False
-        if 'execute' in kwargs:
-            execute = kwargs.pop('execute')
-        if 'wait_ready' in kwargs:
-            wait_ready = kwargs.pop('wait_ready')
-        else:
-            wait_ready = False
-        func(self, *args, **kwargs)
-        if execute:
-            return self.executeChain(wait_ready=wait_ready)
-    return addAndExec
+    @classmethod
+    def execWrap(cls, func):
+        """
+        Decorator to wrap chainable commands, allowing for immediate execution
+        of the wrapped command by passing in an `execute=True` kwarg. If `wait_ready=True`
+        is True, after excuted the program will wait util the pump is ready.
+        """
+        @wraps(func)
+        def addAndExec(self, *args, **kwargs):
+            execute = True
+            wait_ready = True
+            if 'execute' in kwargs:
+                execute = kwargs.pop('execute')
+            if 'wait_ready' in kwargs:
+                wait_ready = kwargs.pop('wait_ready')
+            func(self, *args, **kwargs)
+            if execute:
+                return self.executeChain(wait_ready=wait_ready)
+        return addAndExec
