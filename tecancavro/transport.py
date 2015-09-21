@@ -36,7 +36,7 @@ try:
 except:
     from time import sleep
 
-from .tecanapi import TecanAPI, TecanAPITimeout
+from tecanapi import TecanAPI, TecanAPITimeout
 
 # From http://stackoverflow.com/questions/12090503/
 #      listing-available-com-ports-with-python

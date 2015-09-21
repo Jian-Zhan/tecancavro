@@ -6,6 +6,7 @@ try:
 except:
     from time import sleep
 
+import logging
 
 class SyringeError(Exception):
     """
@@ -54,11 +55,16 @@ class Syringe(object):
         15: 'Command Overflow'
     }
 
-    def __init__(self, com_link):
+    def __init__(self, com_link, debug=False, debug_log_path='.'):
         self.com_link = com_link
         self._ready = False
         self._prev_error_code = 0
         self._repeat_error = False
+
+        # Handle debug mode init
+        self.debug = debug
+        if self.debug:
+            self.initDebugLogging(debug_log_path)
 
     def _sendRcv(self, cmd_string):
         response = self.com_link.sendRcv(cmd_string)
@@ -129,3 +135,30 @@ class Syringe(object):
                 return
         raise(SyringeTimeout('Timeout while waiting for syringe to be ready'
                              ' to accept commands [{}]'.format(timeout)))
+
+    #########################################################################
+    # Debug functions                                                       #
+    #########################################################################
+
+    def initDebugLogging(self, debug_log_path):
+        """ Initialize logger and log file handler """
+
+        self.logger = logging.getLogger(self.__class__.__name__)
+        fp = debug_log_path.rstrip("/") + "/" + self.__class__.__name__ + '_debug.log'
+        hdlr = logging.FileHandler(fp)
+        formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+        hdlr.setFormatter(formatter)
+        self.logger.addHandler(hdlr)
+        self.logger.setLevel(logging.DEBUG)
+
+    def logCall(self, f_name, f_locals):
+        """ Logs function params at call """
+
+        if self.debug:
+            self.logger.debug('-> {}: {}'.format(f_name, f_locals))
+
+    def logDebug(self, msg):
+        """ Handles debug logging if self.debug == True """
+
+        if self.debug:
+            self.logger.debug(msg)
