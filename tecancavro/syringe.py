@@ -7,6 +7,7 @@ except:
     from time import sleep
 
 import logging
+from functools import wraps
 
 class SyringeError(Exception):
     """
@@ -65,6 +66,10 @@ class Syringe(object):
         self.debug = debug
         if self.debug:
             self.initDebugLogging(debug_log_path)
+
+        # Command chaining state information
+        self.cmd_chain = ''
+        self.exec_time = 0
 
     def _sendRcv(self, cmd_string):
         response = self.com_link.sendRcv(cmd_string)
@@ -162,3 +167,97 @@ class Syringe(object):
 
         if self.debug:
             self.logger.debug(msg)
+
+    #########################################################################
+    # Command chain functions                                               #
+    #########################################################################
+
+    def sendRcv(self, cmd_string, execute=False):
+        """
+        Send a raw command string and return a tuple containing the parsed
+        response data: (Data, Ready). If the syringe is ready to accept
+        another command, `Ready` with be 'True'.
+
+        Args:
+            `cmd_string` (bytestring) : a valid Tecan XCalibur command string
+        Kwargs:
+            `execute` : if 'True', the execute byte ('R') is appended to the
+                        `cmd_string` prior to sending
+        Returns:
+            `parsed_reponse` (tuple) : parsed pump response tuple
+
+        """
+        self.logCall('sendRcv', locals())
+
+        if execute:
+            cmd_string += 'R'
+        self.last_cmd = cmd_string
+        self.logDebug('sendRcv: sending cmd_string: {}'.format(cmd_string))
+        with self._syringeErrorHandler():
+            parsed_response = self._sendRcv(cmd_string)
+            self.logDebug('sendRcv: received response: {}'.format(
+                          parsed_response))
+            data = parsed_response[0]
+            return data
+
+    def executeChain(self, wait_ready=False):
+        """
+        Executes and resets the current command chain (`self.cmd_chain`).
+        Returns the estimated execution time (`self.exec_time`) for the chain.
+
+        """
+        self.logCall('executeChain', locals())
+
+        # Compensate for reset time (tic/toc) prior to returning extra_wait_time
+        tic = time.time()
+        self.sendRcv(self.cmd_chain, execute=True)
+        exec_time = self.exec_time
+        self.resetChain(on_execute=True, wait_ready=wait_ready)
+        if wait_ready:
+            extra_wait_time = 0
+        else:
+            toc = time.time()
+            extra_wait_time = exec_time - (toc-tic)
+            if extra_wait_time < 0:
+                extra_wait_time = 0
+        return extra_wait_time
+
+    def resetChain(self, on_execute=False, wait_ready=False):
+        """
+        Resets the command chain (`self.cmd_chain`) and execution time
+        (`self.exec_time`). Optionally updates `slope` and `microstep`
+        state variables, speeds, and simulation state.
+
+        Kwargs:
+            `on_execute` (bool) : should be used to indicate whether or not
+                                  the chain being reset was executed, which
+                                  will cue slope and microstep state
+                                  updating (as well as speed updating).
+        """
+        self.logCall('resetChain', locals())
+
+        if wait_ready:
+            self._waitReady(delay = self.exec_time)
+
+        self.cmd_chain = ''
+        self.exec_time = 0
+
+def execWrap(func):
+    """
+    Decorator to wrap chainable commands, allowing for immediate execution
+    of the wrapped command by passing in an `execute=True` kwarg.
+
+    """
+    @wraps(func)
+    def addAndExec(self, *args, **kwargs):
+        execute = False
+        if 'execute' in kwargs:
+            execute = kwargs.pop('execute')
+        if 'wait_ready' in kwargs:
+            wait_ready = kwargs.pop('wait_ready')
+        else:
+            wait_ready = False
+        func(self, *args, **kwargs)
+        if execute:
+            return self.executeChain(wait_ready=wait_ready)
+    return addAndExec

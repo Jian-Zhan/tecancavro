@@ -15,8 +15,12 @@ xl3000 = XL3000(com_link,
 xl3000.init(init_port=8)
 print xl3000.getCurPort()
 
-xl3000.changePort(2, execute=True, wait_ready=False)
-print xl3000.getCurPort()
-
 xl3000.changePort(2, execute=True, wait_ready=True)
 print xl3000.getCurPort()
+
+xl3000.changePort(3, execute=True, wait_ready=True)
+print xl3000.getCurPort()
+
+print xl3000.getPlungerPos(), xl3000.getEncoderPos()
+xl3000.movePlungerAbs(3000, execute=True, wait_ready=True)
+print xl3000.getPlungerPos(), xl3000.getEncoderPos()

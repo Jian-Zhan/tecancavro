@@ -9,7 +9,6 @@ import logging
 
 from math import sqrt
 from time import sleep
-from functools import wraps
 from contextlib import contextmanager
 
 try:
@@ -18,7 +17,7 @@ try:
 except:
     from time import sleep
 
-from syringe import Syringe, SyringeError, SyringeTimeout
+from syringe import Syringe, SyringeError, SyringeTimeout, execWrap
 
 
 class XL3000(Syringe):
@@ -27,8 +26,6 @@ class XL3000(Syringe):
     end validation and convenience functions (e.g. smartExtract) -- see
     individual docstrings for more information.
     """
-
-    DIR_DICT = {'CW': ('I', 'Z'), 'CCW': ('O', 'Y')}
 
     SPEED_CODES = {0: 6000, 1: 5600, 2: 5000, 3: 4400, 4: 3800, 5: 3200,
                    6: 2600, 7: 2200, 8: 2000, 9: 1800, 10: 1600, 11: 1400,
@@ -93,9 +90,6 @@ class XL3000(Syringe):
 
         self.setMicrostep(on=microstep)
 
-        # Command chaining state information
-        self.cmd_chain = ''
-        self.exec_time = 0
         self.sim_speed_change = False
         self.sim_state = {k: v for k,v in self.state.items()}
 
@@ -104,192 +98,6 @@ class XL3000(Syringe):
         self.getPlungerPos()
         self.getCurPort()
         self.updateSimState()
-
-
-    #########################################################################
-    # Pump initialization                                                   #
-    #########################################################################
-
-    def init(self, init_force=None, init_port=None):
-        """
-        Initialize pump. Uses instance `self.init_force` and `self.init_port`
-        if not provided. Blocks until initialization is complete.
-
-        """
-        self.logCall('init', locals())
-
-        init_force = init_force if init_force is not None else self.init_force
-        init_port = init_port if init_port is not None else self.init_port
-
-        if init_port == 1:
-            init_cmd = "Z"
-        elif init_port == self.num_ports:
-            init_cmd = "Y"
-        else:
-            raise ValueError('`init_port` [{0}] must be 1 or {1}'.format(init_port, self.num_ports))
-
-        if init_force < 0:
-            init_force = self._calcInitForce()
-
-        cmd_string = '{0}{1}'.format(
-                     init_cmd,
-                     init_force)
-        self.sendRcv(cmd_string, execute=True)
-        self.waitReady()
-        return 0  # 0 seconds left to wait
-
-    #########################################################################
-    # Convenience functions                                                 #
-    #########################################################################
-
-    def extractToWaste(self, in_port, volume_ul, out_port=None,
-                       speed_code=None, flush=False):
-        """
-        Extracts `volume_ul` from `in_port`. If the relative plunger move
-        exceeds the encoder range, the syringe will dispense to `out_port`,
-        which defaults to `self.waste_port`. If `flush` is `True`, the contents of the syringe
-        will be flushed to waste following the extraction.
-
-        """
-        self.logCall('extractToWaste', locals())
-
-        out_port = out_port if out_port is not None else self.waste_port
-        if speed_code is not None:
-            self.setSpeed(speed_code)
-        self.cacheSimSpeeds()
-        steps = self._ulToSteps(volume_ul)
-
-        retry = False
-        extracted = False
-
-        while not extracted:
-            try:
-                # If the move is calculated to execeed 3000 encoder counts,
-                # dispense to waste and then make relative plunger extract
-                if (self.sim_state['plunger_pos'] + steps) > 3000 or retry:
-                    self.logDebug('extractToWaste: move would exceed 3000 '
-                                  'dumping to out port [{}]'.format(out_port))
-                    self.changePort(out_port, from_port=in_port)
-                    self.setSpeed(0)
-                    self.movePlungerAbs(0)
-                    self.changePort(in_port, from_port=out_port)
-                    self.restoreSimSpeeds()
-                # Make relative plunger extract
-                self.changePort(in_port)
-                self.logDebug('extractToWaste: attempting relative extract '
-                              '[steps: {}]'.format(steps))
-                # Delay execution 200 ms to stop oscillations
-                self.delayExec(200)
-                self.movePlungerRel(steps)
-                if flush:
-                    self.dispenseToWaste()
-                exec_time = self.executeChain()
-                extracted = True
-            except SyringeError as e:
-                if e.err_code in [2, 3, 4]:
-                    self.logDebug('extractToWaste: caught SyringeError [{}], '
-                                  'retrying.')
-                    retry = True
-                    self.resetChain()
-                    self.waitReady()
-                    continue
-                else:
-                    raise
-        return exec_time
-
-    def primePort(self, in_port, volume_ul, speed_code=None, out_port=None,
-                  split_command=False):
-        """
-        Primes the line on `in_port` with `volume_ul`, which can
-        exceed the maximum syringe volume. If `speed_code` is
-        provided, the syringe speed will be appended to the
-        beginning of the command chain. Blocks until priming is complete.
-
-        """
-        self.logCall('primePort', locals())
-
-        if out_port is None:
-            out_port = self.waste_port
-        if speed_code is not None:
-            self.setSpeed(speed_code)
-        if volume_ul > self.syringe_ul:
-            num_rounds = volume_ul / self.syringe_ul
-            remainder_ul = volume_ul % self.syringe_ul
-            self.changePort(out_port, from_port=in_port)
-            self.movePlungerAbs(0)
-            for x in xrange(num_rounds):
-                self.changePort(in_port, from_port=out_port)
-                self.movePlungerAbs(3000)
-                self.changePort(out_port, from_port=in_port)
-                self.movePlungerAbs(0)
-                delay = self.executeChain()
-                self.waitReady(delay)
-            if remainder_ul != 0:
-                self.changePort(in_port, from_port=out_port)
-                self.movePlungerAbs(self._ulToSteps(remainder_ul))
-                self.changePort(out_port, from_port=in_port)
-                self.movePlungerAbs(0)
-                delay = self.executeChain()
-                self.waitReady(delay)
-        else:
-            self.changePort(out_port)
-            self.movePlungerAbs(0)
-            self.changePort(in_port, from_port=out_port)
-            self.movePlungerAbs(self._ulToSteps(volume_ul))
-            self.changePort(out_port, from_port=in_port)
-            self.movePlungerAbs(0)
-            delay = self.executeChain()
-            self.waitReady(delay)
-
-    #########################################################################
-    # Command chain functions                                               #
-    #########################################################################
-
-    def executeChain(self, wait_ready=False):
-        """
-        Executes and resets the current command chain (`self.cmd_chain`).
-        Returns the estimated execution time (`self.exec_time`) for the chain.
-
-        """
-        self.logCall('executeChain', locals())
-
-        # Compensaate for reset time (tic/toc) prior to returning wait_time
-        tic = time.time()
-        self.sendRcv(self.cmd_chain, execute=True)
-        exec_time = self.exec_time
-        self.resetChain(on_execute=True, wait_ready=wait_ready)
-        toc = time.time()
-        wait_time = exec_time - (toc-tic)
-        if wait_time < 0:
-            wait_time = 0
-        return wait_time
-
-    def resetChain(self, on_execute=False, wait_ready=False):
-        """
-        Resets the command chain (`self.cmd_chain`) and execution time
-        (`self.exec_time`). Optionally updates `slope` and `microstep`
-        state variables, speeds, and simulation state.
-
-        Kwargs:
-            `on_execute` (bool) : should be used to indicate whether or not
-                                  the chain being reset was executed, which
-                                  will cue slope and microstep state
-                                  updating (as well as speed updating).
-        """
-        self.logCall('resetChain', locals())
-
-        self.cmd_chain = ''
-        self.exec_time = 0
-        if (on_execute and self.sim_speed_change):
-                self.state['slope'] = self.sim_state['slope']
-                self.state['microstep'] = self.sim_state['microstep']
-                self.updateSpeeds()
-                self.getCurPort()
-                self.getPlungerPos()
-        self.sim_speed_change = False
-        self.updateSimState()
-        if wait_ready:
-            self.waitReady()
 
     def updateSimState(self):
         """
@@ -327,158 +135,60 @@ class XL3000(Syringe):
         if 50 <= self._cached_cutoff_speed <= 2700:
             self.setCutoffSpeed(self._cached_cutoff_speed)
 
-    def execWrap(func):
-        """
-        Decorator to wrap chainable commands, allowing for immediate execution
-        of the wrapped command by passing in an `execute=True` kwarg.
-
-        """
-        @wraps(func)
-        def addAndExec(self, *args, **kwargs):
-            execute = False
-            if 'execute' in kwargs:
-                execute = kwargs.pop('execute')
-            if 'wait_ready' in kwargs:
-                wait_ready = kwargs.pop('wait_ready')
-            else:
-                wait_ready = False
-            func(self, *args, **kwargs)
-            if execute:
-                return self.executeChain(wait_ready=wait_ready)
-        return addAndExec
+    def resetChain(self, on_execute=False, wait_ready=False):
+        Syringe.resetChain(self, on_execute, wait_ready)
+        if (on_execute and self.sim_speed_change):
+                self.state['slope'] = self.sim_state['slope']
+                self.state['microstep'] = self.sim_state['microstep']
+                self.updateSpeeds()
+                self.getCurPort()
+                self.getPlungerPos()
+        self.sim_speed_change = False
+        self.updateSimState()
 
     #########################################################################
-    # Chainable high level functions                                        #
+    # Pump initialization                                                   #
     #########################################################################
 
-    @execWrap
-    def dispenseToWaste(self, retain_port=True):
+    def init(self, init_force=None, init_port=None):
         """
-        Dispense current syringe contents to waste. If `retain_port` is true,
-        the syringe will be returned to the original port after the dump.
-        """
-        self.logCall('dispenseToWaste', locals())
-        if retain_port:
-            orig_port = self.sim_state['port']
-        self.changePort(self.waste_port)
-        self.movePlungerAbs(0)
-        if retain_port:
-            self.changePort(orig_port)
-
-    @execWrap
-    def extract(self, from_port, volume_ul):
-        """ Extract `volume_ul` from `from_port` """
-        self.logCall('extract', locals())
-
-        steps = self._ulToSteps(volume_ul)
-        self.changePort(from_port)
-        self.movePlungerRel(steps)
-
-    @execWrap
-    def dispense(self, to_port, volume_ul):
-        """ Dispense `volume_ul` from `to_port` """
-        self.logCall('dispense', locals())
-
-        steps = self._ulToSteps(volume_ul)
-        self.changePort(to_port)
-        self.movePlungerRel(-steps)
-
-    #########################################################################
-    # Chainable low level functions                                         #
-    #########################################################################
-
-    @execWrap
-    def changePort(self, to_port, from_port=None, direction='CW'):
-        """
-        Change port to `to_port`. If `from_port` is provided, the `direction`
-        will be calculated to minimize travel time. `direction` may also be
-        provided directly.
-
-        Args:
-            `to_port` (int) : port to which to change
-        Kwargs:
-            `from_port` (int) : originating port
-            `direction` (str) : direction of valve movement
-                'CW' - clockwise
-                'CCW' - counterclockwise
+        Initialize pump. Uses instance `self.init_force` and `self.init_port`
+        if not provided. Blocks until initialization is complete.
 
         """
-        self.logCall('changePort', locals())
+        self.logCall('init', locals())
 
-        if not 0 < to_port <= self.num_ports:
-            raise(ValueError('`to_port` [{0}] must be between 1 and '
-                             '`num_ports` [{1}]'.format(to_port,
-                             self.num_ports)))
-        if not from_port:
-            if self.sim_state['port']:
-                from_port = self.sim_state['port']
-            else:
-                from_port = 1
-        delta = to_port - from_port
-        diff = -delta if abs(delta) >= 7 else delta
-        direction = 'CCW' if diff < 0 else 'CW'
-        cmd_string = '{0}{1}'.format(self.__class__.DIR_DICT[direction][0],
-                                     to_port)
-        self.sim_state['port'] = to_port
-        self.cmd_chain += cmd_string
-        self.exec_time += 0.2
+        init_force = init_force if init_force is not None else self.init_force
+        init_port = init_port if init_port is not None else self.init_port
 
-    @execWrap
-    def movePlungerAbs(self, abs_position):
-        """
-        Moves the plunger to absolute position `abs_position`
-
-        Args:
-            `abs_position` (int) : absolute plunger position
-                (0-24000) in microstep mode
-                (0-3000) in standard mode
-
-        """
-        self.logCall('movePlungerAbs', locals())
-
-        if self.sim_state['microstep']:
-            if not 0 <= abs_position <= 24000:
-                raise(ValueError('`abs_position` must be between 0 and 40000'
-                                 ' when operating in microstep mode'.format(
-                                 self.port_num)))
+        if init_port == 1:
+            init_cmd = "Z"
+        elif init_port == self.num_ports:
+            init_cmd = "Y"
         else:
-            if not 0 <= abs_position <= 3000:
-                raise(ValueError('`abs_position` must be between 0 and 40000'
-                                 ' when operating in microstep mode'.format(
-                                 self.port_num)))
-        cmd_string = 'A{0}'.format(abs_position)
-        cur_pos = self.sim_state['plunger_pos']
-        delta_pos = cur_pos-abs_position
-        self.sim_state['plunger_pos'] = abs_position
-        self.cmd_chain += cmd_string
-        self.exec_time += self._calcPlungerMoveTime(abs(delta_pos))
+            raise ValueError('`init_port` [{0}] must be 1 or {1}'.format(init_port, self.num_ports))
 
-    @execWrap
-    def movePlungerRel(self, rel_position):
-        """
-        Moves the plunger to relative position `rel_position`. There is no
-        front-end error handling -- invalid relative moves will result in
-        error code 3 from the XCalibur, raising a `SyringeError`
+        if init_force < 0:
+            init_force = self._calcInitForce()
 
-        Args:
-            `rel_position` (int) : relative plunger position
-                if rel_position < 0 : plunger moves up (relative dispense)
-                if rel_position > 0 : plunger moves down (relative extract)
-
-        """
-        self.logCall('movePlungerRel', locals())
-
-        if rel_position < 0:
-            cmd_string = 'D{0}'.format(abs(rel_position))
-        else:
-            cmd_string = 'P{0}'.format(rel_position)
-        self.sim_state['plunger_pos'] += rel_position
-        self.cmd_chain += cmd_string
-        self.exec_time += self._calcPlungerMoveTime(abs(rel_position))
+        cmd_string = '{0}{1}'.format(
+                     init_cmd,
+                     init_force)
+        self.sendRcv(cmd_string, execute=True)
+        self.waitReady()
+        return 0  # 0 seconds left to wait
 
     #########################################################################
     # Command set commands                                                  #
     #########################################################################
+
+    def setMicrostep(self, on=False):
+        """ Turns microstep mode on or off """
+        self.logCall('setMicrostep', locals())
+
+        cmd_string = 'N{0}'.format(int(on))
+        self.sendRcv(cmd_string, execute=True)
+        self.microstep = on
 
     @execWrap
     def setSpeed(self, speed_code):
@@ -530,59 +240,6 @@ class XL3000(Syringe):
         cmd_string = 'L{0}'.format(slope_code)
         self.sim_speed_change = True
         self.cmd_chain += cmd_string
-
-    # Chainable control commands
-
-    @execWrap
-    def repeatCmdSeq(self, num_repeats):
-        self.logCall('repeatCmdSeq', locals())
-
-        if not 0 < num_repeats < 30000:
-            raise(ValueError('`num_repeats` [{0}] must be between 0 and 30000'
-                             ''.format(num_repeats)))
-        cmd_string = 'G{0}'.format(num_repeats)
-        self.cmd_chain += cmd_string
-        self.exec_time *= num_repeats
-
-    @execWrap
-    def markRepeatStart(self):
-        self.logCall('markRepeatStart', locals())
-
-        cmd_string = 'g'
-        self.cmd_chain += cmd_string
-
-    @execWrap
-    def delayExec(self, delay_ms):
-        """ Delays command execution for `delay` milliseconds """
-        self.logCall('delayExec', locals())
-
-        if not 0 < delay_ms < 30000:
-            raise(ValueError('`delay` [{0}] must be between 0 and 40000 ms'
-                             ''.format(delay_ms)))
-        cmd_string = 'M{0}'.format(delay_ms)
-        self.cmd_chain += cmd_string
-
-    @execWrap
-    def haltExec(self, input_pin=0):
-        """
-        Used within a command string to halt execution until another [R]
-        command is sent, or until TTL pin `input_pin` goes low
-
-        Kwargs:
-            `input_pin` (int) : input pin code corresponding to the desired
-                                TTL input signal pin on the XCalibur
-                0 - either 1 or 2
-                1 - input 1 (J4 pin 7)
-                2 - input 2 (J4 pin 8)
-
-        """
-        self.logCall('haltExec', locals())
-
-        if not 0 <= input_pin < 2:
-            raise(ValueError('`input_pin` [{0}] must be between 0 and 2'
-                             ''.format(input_sig)))
-        cmd_string = 'H{0}'.format(input_sig)
-        return self.sendRcv(cmd_string)
 
     #########################################################################
     # Report commands (cannot be chained)                                   #
@@ -653,29 +310,166 @@ class XL3000(Syringe):
             self.state['port'] = port
             return port
 
-    def getBufferStatus(self):
-        """ Returns the current cmd buffer status (0=empty, 1=non-empty) """
-        self.logCall('getBufferStatus', locals())
-
-        cmd_string = '?10'
-        data = self.sendRcv(cmd_string)
-        return int(data)
-
     #########################################################################
-    # Config commands                                                       #
+    # Chainable functions                                         #
     #########################################################################
 
-    def setMicrostep(self, on=False):
-        """ Turns microstep mode on or off """
-        self.logCall('setMicrostep', locals())
+    @execWrap
+    def changePort(self, to_port, clockwise=None):
+        """
+        Change port to `to_port`. If `clockwise` is None, it
+        will be calculated to minimize travel time. `clockwise` may also be
+        provided directly.
 
-        cmd_string = 'N{0}'.format(int(on))
-        self.sendRcv(cmd_string, execute=True)
-        self.microstep = on
+        Args:
+            `to_port` (int) : port to which to change
+        Kwargs:
+            `clockwise` : direction of valve movement
+                None  - calculated by current port and `to_port`
+                True  - clockwise
+                False - counterclockwise
+
+        """
+        self.logCall('changePort', locals())
+
+        if not 0 < to_port <= self.num_ports:
+            raise(ValueError('`to_port` [{0}] must be between 1 and '
+                             '`num_ports` [{1}]'.format(to_port,
+                             self.num_ports)))
+        
+        if self.sim_state['port']:
+                from_port = self.sim_state['port']
+        else:
+                from_port = self.init_port
+
+        # calculate the travel time
+        diff = to_port - from_port
+        if diff >= 0:
+            cw_delta = diff
+            ccw_delta = self.num_ports - diff
+        else:
+            cw_delta = self.num_ports + diff
+            ccw_delta = -diff
+
+        # if `clockwise` is None, choose rotation direction
+        if clockwise is None:
+            if cw_delta <= ccw_delta:
+                clockwise = True
+            else:
+                clockwise = False
+        
+        # select `delta` and `port_cmd`
+        if clockwise:
+            port_cmd = "I"
+            delta = cw_delta
+        else:
+            port_cmd = "O"
+            delta = ccw_delta
+
+        cmd_string = '{0}{1}'.format(port_cmd,
+                                     to_port)
+        self.sim_state['port'] = to_port
+        self.cmd_chain += cmd_string
+        self.exec_time += 0.02 * delta
+        self.exec_time += 0.1
+
+    @execWrap
+    def movePlungerAbs(self, abs_position):
+        """
+        Moves the plunger to absolute position `abs_position`
+
+        Args:
+            `abs_position` (int) : absolute plunger position
+                (0-24000) in microstep mode
+                (0-3000) in standard mode
+
+        """
+        self.logCall('movePlungerAbs', locals())
+
+        if self.sim_state['microstep']:
+            if not 0 <= abs_position <= 24000:
+                raise(ValueError('`abs_position` must be between 0 and 40000'
+                                 ' when operating in microstep mode'.format(
+                                 self.port_num)))
+        else:
+            if not 0 <= abs_position <= 3000:
+                raise(ValueError('`abs_position` must be between 0 and 40000'
+                                 ' when operating in microstep mode'.format(
+                                 self.port_num)))
+        cmd_string = 'A{0}'.format(abs_position)
+        cur_pos = self.sim_state['plunger_pos']
+        delta_pos = cur_pos-abs_position
+        self.sim_state['plunger_pos'] = abs_position
+        self.cmd_chain += cmd_string
+        self.exec_time += self._calcPlungerMoveTime(abs(delta_pos))
+
+    @execWrap
+    def movePlungerRel(self, rel_position):
+        """
+        Moves the plunger to relative position `rel_position`. There is no
+        front-end error handling -- invalid relative moves will result in
+        error code 3 from the XCalibur, raising a `SyringeError`
+
+        Args:
+            `rel_position` (int) : relative plunger position
+                if rel_position < 0 : plunger moves up (relative dispense)
+                if rel_position > 0 : plunger moves down (relative extract)
+
+        """
+        self.logCall('movePlungerRel', locals())
+
+        if rel_position < 0:
+            cmd_string = 'D{0}'.format(abs(rel_position))
+        else:
+            cmd_string = 'P{0}'.format(rel_position)
+        self.sim_state['plunger_pos'] += rel_position
+        self.cmd_chain += cmd_string
+        self.exec_time += self._calcPlungerMoveTime(abs(rel_position))
+
+    @execWrap
+    def repeatCmdSeq(self, num_repeats):
+        self.logCall('repeatCmdSeq', locals())
+
+        if not 0 < num_repeats < 30000:
+            raise(ValueError('`num_repeats` [{0}] must be between 0 and 30000'
+                             ''.format(num_repeats)))
+        cmd_string = 'G{0}'.format(num_repeats)
+        self.cmd_chain += cmd_string
+        self.exec_time *= num_repeats
+
+    @execWrap
+    def markRepeatStart(self):
+        self.logCall('markRepeatStart', locals())
+
+        cmd_string = 'g'
+        self.cmd_chain += cmd_string
+
+    @execWrap
+    def delayExec(self, delay_ms):
+        """ Delays command execution for `delay` milliseconds """
+        self.logCall('delayExec', locals())
+
+        if not 0 < delay_ms < 30000:
+            raise(ValueError('`delay` [{0}] must be between 0 and 40000 ms'
+                             ''.format(delay_ms)))
+        cmd_string = 'M{0}'.format(delay_ms)
+        self.cmd_chain += cmd_string
+        self.exec_time += delay_ms/1000.0
 
     #########################################################################
     # Control commands                                                      #
     #########################################################################
+
+    @execWrap
+    def haltExec(self):
+        """
+        Used within a command string to halt execution until another [R]
+        command is sent, or until TTL pin goes low
+        """
+        self.logCall('haltExec', locals())
+
+        cmd_string = 'H'
+        return self.sendRcv(cmd_string)
 
     def terminateCmd(self):
         self.logCall('terminateCommand', locals())
@@ -739,33 +533,6 @@ class XL3000(Syringe):
             self._waitReady(timeout=timeout, polling_interval=polling_interval,
                             delay=delay)
 
-    def sendRcv(self, cmd_string, execute=False):
-        """
-        Send a raw command string and return a tuple containing the parsed
-        response data: (Data, Ready). If the syringe is ready to accept
-        another command, `Ready` with be 'True'.
-
-        Args:
-            `cmd_string` (bytestring) : a valid Tecan XCalibur command string
-        Kwargs:
-            `execute` : if 'True', the execute byte ('R') is appended to the
-                        `cmd_string` prior to sending
-        Returns:
-            `parsed_reponse` (tuple) : parsed pump response tuple
-
-        """
-        self.logCall('sendRcv', locals())
-
-        if execute:
-            cmd_string += 'R'
-        self.last_cmd = cmd_string
-        self.logDebug('sendRcv: sending cmd_string: {}'.format(cmd_string))
-        with self._syringeErrorHandler():
-            parsed_response = super(XL3000, self)._sendRcv(cmd_string)
-            self.logDebug('sendRcv: received response: {}'.format(
-                          parsed_response))
-            data = parsed_response[0]
-            return data
 
     def _calcPlungerMoveTime(self, move_steps):
         """
