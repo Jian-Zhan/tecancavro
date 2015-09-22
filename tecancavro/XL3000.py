@@ -9,7 +9,7 @@ TODO: Check SPEED_CODES
 import time
 import logging
 
-from math import sqrt
+from math import sqrt, ceil
 from time import sleep
 from contextlib import contextmanager
 
@@ -90,10 +90,10 @@ class XL3000(Syringe):
             'slope': slope
         }
 
-        self.setMicrostep(on=microstep)
-
         self.sim_speed_change = False
         self.sim_state = {k: v for k,v in self.state.items()}
+
+        self.setMicrostep(on=microstep)
 
         # Init functions
         self.updateSpeeds()
@@ -191,6 +191,8 @@ class XL3000(Syringe):
         cmd_string = 'N{0}'.format(int(on))
         self.sendRcv(cmd_string, execute=True)
         self.microstep = on
+        self.state['microstep'] = on
+        self.sim_state['microstep'] = on
 
     @Syringe.execWrap
     def setSpeed(self, speed_code):
@@ -255,13 +257,19 @@ class XL3000(Syringe):
         self.getCutoffSpeed()
 
     def getPlungerPos(self):
-        """ Returns the absolute plunger position as an int (0-3000) """
+        """ Returns the absolute plunger position as an int """
         self.logCall('getPlungerPos', locals())
 
         cmd_string = '?'
         data = self.sendRcv(cmd_string)
         self.state['plunger_pos'] = int(data)
         return self.state['plunger_pos']
+
+    def getCurVolume(self):
+        """ return the current internal volume of the syringe """
+        self.logCall('getCurVolume', locals())
+
+        return self._stepsToUl(self.getPlungerPos())
 
     def getStartSpeed(self):
         """ Returns the start speed as an int (in pulses/sec) """
@@ -317,7 +325,7 @@ class XL3000(Syringe):
     #########################################################################
 
     @Syringe.execWrap
-    def changePort(self, to_port, clockwise=None):
+    def changePort(self, to_port, from_port=None, clockwise=None):
         """
         Change port to `to_port`. If `clockwise` is None, it
         will be calculated to minimize travel time. `clockwise` may also be
@@ -326,6 +334,8 @@ class XL3000(Syringe):
         Args:
             `to_port` (int) : port to which to change
         Kwargs:
+            `from_port` : port from which to change
+                None  - will be determined automatically
             `clockwise` : direction of valve movement
                 None  - calculated by current port and `to_port`
                 True  - clockwise
@@ -339,10 +349,11 @@ class XL3000(Syringe):
                              '`num_ports` [{1}]'.format(to_port,
                              self.num_ports)))
         
-        if self.sim_state['port']:
-                from_port = self.sim_state['port']
-        else:
-                from_port = self.init_port
+        if from_port is None:
+            if self.sim_state['port']:
+                    from_port = self.sim_state['port']
+            else:
+                    from_port = self.init_port
 
         # calculate the travel time
         diff = to_port - from_port
@@ -388,6 +399,7 @@ class XL3000(Syringe):
         """
         self.logCall('movePlungerAbs', locals())
 
+        abs_position = int(abs_position)
         if self.sim_state['microstep']:
             if not 0 <= abs_position <= 24000:
                 raise(ValueError('`abs_position` must be between 0 and 40000'
@@ -420,6 +432,7 @@ class XL3000(Syringe):
         """
         self.logCall('movePlungerRel', locals())
 
+        rel_position = int(rel_position)
         if rel_position < 0:
             cmd_string = 'D{0}'.format(abs(rel_position))
         else:
@@ -468,8 +481,8 @@ class XL3000(Syringe):
         self.logCall('aspirate', locals())
 
         steps = self._ulToSteps(volume_ul)
-        self.changePort(from_port)
-        self.movePlungerRel(steps)
+        self.changePort(from_port, execute = False)
+        self.movePlungerRel(steps, execute = False)
 
     @Syringe.execWrap
     def dispense(self, to_port, volume_ul):
@@ -477,8 +490,8 @@ class XL3000(Syringe):
         self.logCall('dispense', locals())
 
         steps = self._ulToSteps(volume_ul)
-        self.changePort(to_port)
-        self.movePlungerRel(-steps)
+        self.changePort(to_port, execute = False)
+        self.movePlungerRel(-steps, execute = False)
 
     @Syringe.execWrap
     def dispenseAll(self, to_port):
@@ -486,8 +499,38 @@ class XL3000(Syringe):
         Dispense current syringe contents to `to_port`.
         """
         self.logCall('dispenseAll', locals())
-        self.changePort(to_port)
-        self.movePlungerAbs(0)
+        self.changePort(to_port, execute = False)
+        self.movePlungerAbs(0, execute = False)
+
+    @Syringe.execWrap
+    def transfer(self, from_port, to_port, volume_ul):
+        """
+        transfer `volume_ul` from `from_port` to `to_port`, which can
+        exceed the maximum syringe volume. If there is liquid existing
+        in the syringe, the liquid will be output to `to_port` too.
+
+        Return the maximum volume in one pipetting operation.
+        """
+        self.logCall('transfer', locals())
+
+        curr_steps = self.sim_state['plunger_pos']
+        total_steps = self._ulToSteps(volume_ul) + curr_steps
+        if self.sim_state['microstep']:
+            pipetting_rounds = int(ceil(total_steps / 24000.0))
+        else:
+            pipetting_rounds = int(ceil(total_steps / 3000.0))
+        per_pipetting_steps = total_steps / pipetting_rounds
+
+        if pipetting_rounds > 1:
+            self.markRepeatStart(execute=False)
+        self.changePort(from_port, from_port=to_port, execute=False)
+        self.movePlungerAbs(per_pipetting_steps, execute=False)
+        self.changePort(to_port, from_port=from_port, execute=False)
+        self.movePlungerAbs(0, execute=False)
+        if pipetting_rounds > 1:
+            self.repeatCmdSeq(num_repeats=pipetting_rounds, execute=False)
+
+        return self._stepsToUl(per_pipetting_steps)
 
     #########################################################################
     # Control commands                                                      #
@@ -529,7 +572,7 @@ class XL3000(Syringe):
                           e.err_code))
             if e.err_code in [7, 9, 10]:
                 last_cmd = self.last_cmd
-                self.resetChain()
+                self.resetChain(on_execute=False, wait_ready=False)
                 try:
                     self.logDebug('ErrorHandler: attempting re-init')
                     self.init()
@@ -547,7 +590,7 @@ class XL3000(Syringe):
             else:
                 self.logDebug('ErrorHandler: error not in [7, 9, 10], '
                               're-raising [{}]'.format(e.err_code))
-                self.resetChain()
+                self.resetChain(on_execute=False, wait_ready=False)
                 raise e
         except Exception as e:
             self.resetChain()
@@ -631,6 +674,24 @@ class XL3000(Syringe):
         else:
             steps = volume_ul * (3000/self.syringe_ul)
         return steps
+
+    def _stepsToUl(self, steps, microstep = None):
+        """
+        Converts encoder steps to a volume in microliters (ul).
+
+        Args:
+            `steps` (int) : encoder steps
+        Kwargs:
+            `microstep` (bool) : whether to convert to standard steps or
+                                 microsteps
+
+        """
+        if not microstep: microstep = self.state['microstep']
+        if microstep:
+            volume_ul = steps * (self.syringe_ul / 24000.0)
+        else:
+            volume_ul = steps * (self.syringe_ul / 3000.0)
+        return volume_ul
 
     def _simIncToPulses(self, speed_inc):
         """

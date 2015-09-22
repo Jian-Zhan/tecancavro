@@ -31,3 +31,7 @@ xl3000.aspirate(2, 500, execute = False)
 xl3000.dispense(3, 100, execute = False)
 xl3000.dispenseAll(8, execute = False)
 xl3000.executeChain(wait_ready = True)
+
+xl3000.transfer(2, 8, 2400,  execute = False)
+xl3000.executeChain(wait_ready = True)
+print xl3000.getCurVolume(), xl3000.getCurPort()
